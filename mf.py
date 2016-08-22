@@ -2,37 +2,36 @@ import theano
 import theano.tensor as T
 import lasagne
 import numpy as np
-from scipy import sparse
+from sklearn.cross_validation import train_test_split
 
-from utils import get_data
-from metrics import mean_average_precision, roc_auc
+from base import BaseRecommender
 
 
-class ClassicMF(object):
+class MF(BaseRecommender):
 
-    def __init__(self, num_factors=20, learning_rate=0.01, optimizer=lasagne.updates.adagrad, regularization=0.00015, num_epochs=100):
-        self.num_factors = num_factors
+    def __init__(self, n_users, n_items, n_factors=20, learning_rate=0.2, optimizer=lasagne.updates.adagrad, regularization=0.0002, n_epochs=100, verbose=False):
+        super(MF, self).__init__(n_users, n_items)
+        self.n_factors = n_factors
         self.learning_rate = learning_rate
         self.optimizer = optimizer
         self.regularization = regularization
-        self.num_epochs = num_epochs
+        self.n_epochs = n_epochs
+        self.verbose = verbose
 
-    def initialize(self, train, test):
-        num_users, num_items = train.shape
-        self.num_users, self.num_items = num_users, num_items
+    def initialize(self):
         users = T.ivector()
         items = T.ivector()
         ratings = T.vector()
 
         self.U = theano.shared(
             np.array(
-                np.random.normal(scale=0.01, size=(num_users, self.num_factors)),
+                np.random.normal(scale=0.001, size=(self.n_users, self.n_factors)),
                 dtype=theano.config.floatX
             )
         )
         self.I = theano.shared(
             np.array(
-                np.random.normal(scale=0.01, size=(num_items, self.num_factors)),
+                np.random.normal(scale=0.001, size=(self.n_items, self.n_factors)),
                 dtype=theano.config.floatX
             )
         )
@@ -51,54 +50,36 @@ class ClassicMF(object):
         params = [self.U, self.I]
         learning_rate = theano.shared(np.array(self.learning_rate, dtype=theano.config.floatX))
         updates = self.optimizer(train_error, params, learning_rate=learning_rate)
-        self.train = theano.function([users, items, ratings], train_error, updates=updates)
-        self.test = theano.function([users, items, ratings], test_error)
-        self.predict = theano.function([users, items], predictions)
+        self.train_theano = theano.function([users, items, ratings], train_error, updates=updates)
+        self.test_theano = theano.function([users, items, ratings], test_error)
+        self.predict_theano = theano.function([users, items], predictions)
 
-    def train(self, train, test):
-        self.initialize(train, test)
+    def fit(self, X, y=None):
+        self.initialize()
+        M = self.construct_sparse_matrix(X).tocoo()
 
-        train_coo = sparse.coo_matrix(train)
-        test_coo = sparse.coo_matrix(test)
+        users = np.int32(M.row)
+        items = np.int32(M.col)
+        ratings = np.float32(M.data)
 
-        train_users = np.int32(train_coo.row)
-        train_items = np.int32(train_coo.col)
-        train_ratings = np.float32(train_coo.data)
-        test_users = np.int32(test_coo.row)
-        test_items = np.int32(test_coo.col)
-        test_ratings = np.float32(test_coo.data)
+        idx = np.arange(len(users))
+        train_idx, test_idx = train_test_split(idx, test_size=0.1)
 
-        train_errors = []
-        test_errors = []
-        prev_err = None
+        train_users = users[train_idx]
+        train_items = items[train_idx]
+        train_ratings = ratings[train_idx]
 
-        for e in xrange(self.num_epochs):
-            train_err = self.train(train_users, train_items, train_ratings)
-            test_err = self.test(test_users, test_items, test_ratings)
-            if prev_err is not None:
-                if test_err > prev_err:
-                    print 'early stopping'
-                    break
-            prev_err = test_err
-            # rmse
-            train_err = np.sqrt(float(train_err))
-            test_err = np.sqrt(float(test_err))
-            train_errors.append(train_err)
-            test_errors.append(test_err)
+        validation_users = users[test_idx]
+        validation_items = items[test_idx]
+        validation_ratings = ratings[test_idx]
 
-            test_predictions = self.predict(test_users, test_items)
-            roc_auc_val = roc_auc(test_ratings, test_predictions)
-            map_val = mean_average_precision(test_ratings, test_predictions)
-            print 'epoch {}, train RMSE: {:.6f}, test RMSE: {:.6f}, ROC AUC: {:.4f}, MAP: {:.4f}'.format(e, train_err, test_err, roc_auc_val, map_val)
+        for e in xrange(self.n_epochs):
+            train_err = np.sqrt(float(self.train_theano(train_users, train_items, train_ratings)))
+            validation_err = np.sqrt(float(self.test_theano(validation_users, validation_items, validation_ratings)))
+            if self.verbose:
+                print 'epoch {}, train RMSE: {:.6f}, validation RMSE {:.6f}'.format(e, train_err, validation_err)
+        self.popularity_ = self.count_popularity(train_items)
+        return self
 
-
-if __name__ == '__main__':
-    train, test = get_data('ml-100k')
-    mf = ClassicMF(
-        num_factors=50,
-        learning_rate=0.07,
-        optimizer=lasagne.updates.adagrad,
-        regularization=0.0000003,
-        num_epochs=500
-    )
-    mf.train(train, test)
+    def predict(self, users, items):
+        return self.predict_theano(np.int32(users), np.int32(items))
