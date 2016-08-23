@@ -20,7 +20,7 @@ class AdversarialMF(BaseRecommender):
         {'n_neurons': 1, 'nonlinearity': sigmoid}
     )
 
-    def __init__(self, n_users, n_items, n_factors=20, g_lr=0.001, d_lr=0.001, optimizer=lasagne.updates.adagrad, discriminator_k=3, n_epochs=100, discriminator_regularization=0., generator_regularization=0., discriminator_params=None):
+    def __init__(self, n_users, n_items, n_factors=20, g_lr=0.01, d_lr=0.01, optimizer=lasagne.updates.adagrad, discriminator_k=1, n_epochs=100, discriminator_regularization=0.05, generator_regularization=0.0, discriminator_params=None, metric=avg_roc_sauc_weighted):
         super(AdversarialMF, self).__init__(n_users, n_items)
         self.n_factors = n_factors
         self.discriminator_regularization = discriminator_regularization
@@ -31,6 +31,7 @@ class AdversarialMF(BaseRecommender):
         self.optimizer = optimizer
         self.n_epochs = n_epochs
         self.discriminator_params = discriminator_params or self.default_discriminator_params
+        self.metric = metric
 
     def initialize(self, input_data):
         users = T.ivector()
@@ -86,6 +87,12 @@ class AdversarialMF(BaseRecommender):
         self.initialize(train_ratings)
         self.popularity_ = self.count_popularity(train_items)
 
+        best_params = {
+            'U': self.U.get_value(),
+            'I': self.I.get_value()
+        }
+        best_score = 0
+
         for e in xrange(self.n_epochs):
             g_values = []
             d_values = []
@@ -96,9 +103,17 @@ class AdversarialMF(BaseRecommender):
             # train generator
             g_obj = self.g_train(train_users, train_items)
             g_values.append(g_obj)
-            print e, avg_roc_sauc_weighted(self, X_test), g_obj, d_obj
+            score = self.metric(self, X_test)
+            if score > best_score:
+                print 'new best score', best_score
+                best_score = score
+                best_params['U'] = self.U.get_value()
+                best_params['I'] = self.I.get_value()
+            print e, avg_roc_sauc_weighted(self, X_test), g_obj, d_obj, 'best score', best_score
             # print e, g_obj, d_obj
 
+        self.U.set_value(best_params['U'])
+        self.I.set_value(best_params['I'])
         return self
 
     def predict(self, users, items):

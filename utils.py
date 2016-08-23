@@ -118,6 +118,34 @@ class KaggleMillionSongs(object):
         return self.convert_to_matrix(df, user_map, item_map)
 
 
+class OnlineRetail(object):
+
+    def get(self):
+        cached_path = 'datasets/online_retail/cached.pkl'
+        if os.path.exists(cached_path):
+            return pickle.load(open(cached_path)).astype('float32')
+        df = pd.read_excel('datasets/online_retail/Online Retail.xlsx')
+        df = df.loc[pd.isnull(df.CustomerID) == False]
+        df['CustomerID'] = df.CustomerID.astype(int)  # Convert to int for customer ID
+        df = df[['StockCode', 'Quantity', 'CustomerID']]  # Get rid of unnecessary info
+        df = df.groupby(['CustomerID', 'StockCode']).sum().reset_index()  # Group together
+        df.Quantity.loc[df.Quantity == 0] = 1  # Replace a sum of zero purchases with a one to
+        # indicate purchased
+        df = df.query('Quantity > 0')  # Only get customers where purchase totals were positive
+
+        customers = list(np.sort(df.CustomerID.unique()))  # Get our unique customers
+        products = list(df.StockCode.unique())  # Get our unique products that were purchased
+        quantity = list(df.Quantity)  # All of our purchases
+
+        rows = df.CustomerID.astype('category', categories=customers).cat.codes
+        # Get the associated row indices
+        cols = df.StockCode.astype('category', categories=products).cat.codes
+        # Get the associated column indices
+        M = sparse.csr_matrix((quantity, (rows, cols)), shape=(len(customers), len(products)))
+        pickle.dump(M, open(cached_path, 'w'))
+        return M.astype('float32')
+
+
 def get_data(dataset):
     if dataset == 'ml-100k':
         return MovieLens100k().get()
@@ -125,5 +153,73 @@ def get_data(dataset):
         return KaggleMillionSongs().get()
     elif dataset == '1m-songs-subset':
         return pickle.load(open('datasets/1m-songs-subset.pkl'))
+    elif dataset == 'online-retail':
+        return OnlineRetail().get()
     else:
         raise ValueError("Unknown dataset: {}".format(dataset))
+
+
+def get_index_pairs(arr):
+    diffs = np.ediff1d(arr, to_begin=1, to_end=1)
+    indices = diffs.nonzero()[0]
+    return np.c_[indices[:-1], indices[1:]]
+
+
+def sort_by_users(X, return_index=False):
+    # sorting X by users
+    idx = X[:, 0].argsort()
+    X = X[idx]
+
+    # split by user-continuous chunks
+    index_pairs = get_index_pairs(X[:, 0])
+    if not return_index:
+        return X, index_pairs
+    else:
+        return X, index_pairs, idx
+
+
+def add_implicit_negatives(X, n_items, factor=1):
+    X_sorted, index_pairs = sort_by_users(X)
+    n_samples = X_sorted.shape[0] * factor
+    # make a user-by-items dictionary
+    values = np.vstack([X_sorted[:, 0], X_sorted[:, 1]]).T
+    data_dict = {}
+    for pair in index_pairs:
+        i, j = pair[0], pair[1]
+        data_dict[values[i, 0]] = set(values[i: j, 1])
+
+    sampled_users = np.repeat(values[:, 0], factor)
+    left_out_users = np.arange(n_samples)
+    sampled_negative_items = np.zeros(n_samples)
+
+    # weight items according to popularity
+    weights = bincount_relative(np.int32(values[:, 1]), max_value=n_items - 1, min_value=0)
+
+    # sample negative items by sampling all items at once
+    # and then retrying for items that are in `data_dict`
+    while len(left_out_users) > 0:
+        failed = []
+        neg_items = np.random.choice(n_items, p=weights, size=len(left_out_users))
+        for item_idx, user_idx in enumerate(left_out_users):
+            user = sampled_users[user_idx]
+            item = neg_items[item_idx]
+            if item in data_dict[user]:
+                failed.append(user_idx)
+            else:
+                sampled_negative_items[user_idx] = item
+        left_out_users = failed
+
+    negatives = np.vstack([
+        sampled_users,
+        sampled_negative_items,
+        np.zeros(n_samples)
+    ]).T
+
+    # uncomment to check that sampling works correctly
+    # check = dict(zip(zip(X_sorted[:, 0], X_sorted[:, 1]), X_sorted[:, 2]))
+    # for i in negatives:
+    #     if (i[0], i[1]) in check:
+    #         print 'wrong sample', (i[0], i[1]), check[(i[0], i[1])]
+    #         raise Exception('wrong sample')
+
+    return np.vstack([X_sorted, negatives])

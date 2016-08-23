@@ -4,6 +4,7 @@
 # from utils import *
 from collections import defaultdict
 import numpy as np
+from utils import *
 
 
 def group_by_users(users, items, ratings):
@@ -13,7 +14,13 @@ def group_by_users(users, items, ratings):
     return result
 
 
-def avg_roc_auc(recommender, X, y=None):
+def avg_roc_auc(recommender, X_, y=None):
+    # binarize ratings
+    X = X_.copy()
+    X[:, 2] = np.ones(len(X))
+    print len(X)
+    X = add_implicit_negatives(X, recommender.n_items)
+
     users, items, ratings = np.int32(X[:, 0]), np.int32(X[:, 1]), X[:, 2]
     scores = recommender.predict(users, items)
 
@@ -23,6 +30,7 @@ def avg_roc_auc(recommender, X, y=None):
     for user in rating_dict:
         user_items, user_ratings = zip(*rating_dict[user])
         _, user_scores = zip(*scores_dict[user])
+
         hits = 0
         total = 0
         for i in xrange(len(user_ratings)):
@@ -38,6 +46,10 @@ def avg_roc_auc(recommender, X, y=None):
             auc = 0.5
         else:
             auc = hits / float(total)
+        # print user_ratings
+        # print user_scores
+        # print auc
+        # raw_input()
         auc_values.append(auc)
     return np.mean(auc_values)
 
